@@ -3,86 +3,102 @@ import google.generativeai as genai
 import os
 from flask import Flask
 from threading import Thread
+import traceback
 
-# ---------------------------------------------------------
-# ★ Renderを騙すための「ダミーWebサーバー」機能
-# ---------------------------------------------------------
+# --- Render用ダミーサーバー ---
 app = Flask('')
-
 @app.route('/')
-def home():
-    return "I am alive! (Bot is running)"
-
-def run():
-    # Renderで指定したポート8080を使う
-    app.run(host='0.0.0.0', port=8080)
-
+def home(): return "I am alive!"
+def run(): app.run(host='0.0.0.0', port=8080)
 def keep_alive():
     t = Thread(target=run)
     t.start()
+# ---------------------------
 
-# ---------------------------------------------------------
-# ★ ここから下がいつものボットのコード
-# ---------------------------------------------------------
-
-# Discordの準備
+# 設定
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# Geminiの準備
 GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY")
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# 使えるモデルを自動で探して設定する機能
-target_model = "gemini-1.5-flash" # 第一希望
-
-try:
-    print("--- 利用可能なモデルを探しています ---")
-    available_models = []
-    for m in genai.list_models():
-        if 'generateContent' in m.supported_generation_methods:
-            available_models.append(m.name)
-            # print(f"発見: {m.name}") # ログが長くなるのでコメントアウト
-
-    # 第一希望がリストにあるか確認
-    if "models/gemini-1.5-flash" in available_models or "gemini-1.5-flash" in available_models:
-        target_model = "gemini-1.5-flash"
-    elif "models/gemini-pro" in available_models or "gemini-pro" in available_models:
-        target_model = "gemini-pro"
-    elif len(available_models) > 0:
-        target_model = available_models[0].replace("models/", "")
-    
-    print(f"--- 決定: 【{target_model}】を使用します ---")
-
-except Exception as e:
-    print(f"モデル検索に失敗しました: {e}")
-    target_model = "gemini-pro"
-
-model = genai.GenerativeModel(target_model)
-
 @client.event
 async def on_ready():
-    print(f'We have logged in as {client.user}')
+    print(f'ログインしました: {client.user}')
 
 @client.event
 async def on_message(message):
     if message.author == client.user:
         return
 
+    # ★デバッグ用コマンド：使えるモデルを全部表示する
+    if message.content == '!models':
+        try:
+            m_list = []
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    m_list.append(m.name)
+            await message.channel.send(f"📋 使用可能なモデル一覧:\n" + "\n".join(m_list))
+        except Exception as e:
+            await message.channel.send(f"モデル一覧の取得に失敗: {e}")
+
     if message.content.startswith('!battle'):
         topic = message.content[8:]
-        await message.channel.send(f"📢 テーマ「{topic}」についてレスバトルを開始します！\n(使用モデル: {target_model})")
         
-        prompt = f"あなたはプロのディベーターです。以下のテーマについて、肯定側と否定側に分かれて激論を交わしてください。\nテーマ: {topic}\n\n形式:\n肯定側: [意見]\n否定側: [意見]\n（これを3往復）\n最後に勝敗を判定してください。"
+        # 試すモデルの順番（上から順に使えそうなやつを探す）
+        candidate_models = [
+            "gemini-2.5-flash", # 最新（もしあれば）
+            "gemini-1.5-flash", # 定番
+            "gemini-1.5-pro",
+            "gemini-pro",       # 旧安定版
+            "models/gemini-1.5-flash",
+            "models/gemini-pro"
+        ]
         
+        # 自動検索で見つかったモデルがあれば先頭に追加
         try:
-            async with message.channel.typing():
-                response = model.generate_content(prompt)
-                await message.channel.send(response.text)
-        except Exception as e:
-            await message.channel.send(f"エラーが発生しました: {e}")
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    candidate_models.insert(0, m.name)
+                    break 
+        except:
+            pass
 
-# ★ 最後にダミーサーバーを起動してからボットを動かす
+        # 重複を削除
+        candidate_models = list(dict.fromkeys(candidate_models))
+
+        await message.channel.send(f"📢 テーマ「{topic}」についてレスバトルを開始します！")
+        
+        prompt = f"テーマ「{topic}」について、肯定側と否定側に分かれて3往復の議論をし、最後に勝敗を決めてください。"
+
+        # ★ エラーが出たら次のモデルで再挑戦するロジック
+        success = False
+        last_error = ""
+
+        async with message.channel.typing():
+            for model_name in candidate_models:
+                try:
+                    # モデル名をきれいにする（models/ があるとエラーになる場合があるので調整）
+                    clean_name = model_name.replace("models/", "") if "/" in model_name else model_name
+                    
+                    # 生成トライ
+                    model = genai.GenerativeModel(clean_name)
+                    response = model.generate_content(prompt)
+                    
+                    # 成功したら送信してループを抜ける
+                    await message.channel.send(f"✅ 成功 (モデル: {clean_name})\n\n{response.text}")
+                    success = True
+                    break
+                
+                except Exception as e:
+                    # 失敗したら次へ
+                    last_error = str(e)
+                    print(f"モデル {model_name} で失敗: {e}")
+                    continue
+            
+            if not success:
+                await message.channel.send(f"❌ すべてのモデルで失敗しました。\n最後のエラー: {last_error}\n\n`!models` と入力して、使えるモデルがあるか確認してください。")
+
 keep_alive()
 client.run(os.environ["DISCORD_TOKEN"])
