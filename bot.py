@@ -27,7 +27,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # Geminiの設定
 genai.configure(api_key=GEMINI_API_KEY)
 # 高速で無料枠の多いモデルを使用
-model = genai.GenerativeModel("gemini-pro")
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 # Discordの設定
 intents = discord.Intents.default()
